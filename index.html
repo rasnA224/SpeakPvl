@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SpeakPvl</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="header">
+<div class="logo">Speak<span>Pvl</span></div>
+<div class="nav-tabs">
+<button class="nav-tab active" onclick="showView('map')">🗺️ Map</button>
+<button class="nav-tab" onclick="showView('list')">📍 Places</button>
+</div>
+</div>
+
+<!-- MAP VIEW -->
+<div class="view active" id="mapView">
+<div id="map"></div>
+<div class="map-info-panel" id="mapPanel">
+<div class="place-name" id="panelName"></div>
+<div class="place-dist" id="panelDist"></div>
+<button class="open-btn" onclick="openCurrentLocation()">Open lesson →</button>
+</div>
+</div>
+
+<!-- LOCATION DETAIL VIEW -->
+<div class="view" id="detailView"></div>
+
+<!-- LIST VIEW -->
+<div class="view" id="listView">
+<div class="list-header">
+<h2>Locations in Pavlodar</h2>
+<p>Tap a place to start a vocabulary lesson</p>
+</div>
+<div class="location-cards" id="locationCards"></div>
+</div>
+
+<script src="data.js"></script>
+<script>
+// ── STATE ─────────────────────────────────────────────────────────
+let currentLang = 'ru';
+let currentLocationId = null;
+let userLatLng = null;
+let map = null;
+let markers = {};
+
+// ── SPEECH ────────────────────────────────────────────────────────
+const synth = window.speechSynthesis;
+let ttsSupported = !!synth;
+
+// Lang → BCP-47 code
+const langCode = { en: 'en-US', ru: 'ru-RU', kz: 'kk-KZ' };
+
+function speak(text, lang) {
+if (!ttsSupported || !text.trim()) return;
+synth.cancel();
+const utt = new SpeechSynthesisUtterance(text);
+utt.lang = langCode[lang] || 'en-US';
+utt.rate = 0.9;
+synth.speak(utt);
+}
+
+// Read the full sentence for current location
+function speakSentence(lang) {
+if (!currentLocationId) return;
+const loc = locations[currentLocationId];
+const words = loc.text
+.filter(w => w.en !== 'break')
+.map(w => lang === 'en' ? w.en : (w[lang] || w.en))
+.join(' ');
+speak(words, lang);
+
+// Animate the play button
+const btn = document.getElementById('speakSentenceBtn');
+if (btn) {
+btn.classList.add('speaking');
+synth.cancel();
+const utt = new SpeechSynthesisUtterance(words);
+utt.lang = langCode[lang] || 'en-US';
+utt.rate = 0.9;
+utt.onend = () => btn.classList.remove('speaking');
+synth.speak(utt);
+}
+}
+
+// ── VIEWS ─────────────────────────────────────────────────────────
+function showView(name) {
+document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+
+const viewMap = { map: 'mapView', list: 'listView', detail: 'detailView' };
+document.getElementById(viewMap[name]).classList.add('active');
+
+const tabMap = { map: 0, list: 1 };
+if (tabMap[name] !== undefined) {
+document.querySelectorAll('.nav-tab')[tabMap[name]].classList.add('active');
+}
+
+if (name === 'map' && !map) initMap();
+if (name === 'list') renderList();
+}
+
+// ── DISTANCE ──────────────────────────────────────────────────────
+function haversineKm(lat1, lng1, lat2, lng2) {
+const R = 6371;
+const dLat = (lat2 - lat1) * Math.PI / 180;
+const dLng = (lng2 - lng1) * Math.PI / 180;
+const a = Math.sin(dLat/2)**2 +
+Math.cos(lat1 * Math.PI/180) * Math.cos(lat2 * Math.PI/180) * Math.sin(dLng/2)**2;
+return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+function formatDist(km) {
+if (km < 1) return ${Math.round(km * 1000)} m away; return ``${km.toFixed(1)} km away;
+}
+
+function distanceTo(loc) {
+if (!userLatLng) return null;
+return haversineKm(userLatLng.lat, userLatLng.lng, loc.lat, loc.lng);
+}
+
+// ── MAP ───────────────────────────────────────────────────────────
+function initMap() {
+map = L.map('map', { zoomControl: true }).setView([52.2879, 76.9550], 14);
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+attribution: '© OpenStreetMap contributors',
+maxZoom: 19
+}).addTo(map);
+
+Object.values(locations).forEach(loc => {
+const icon = L.divIcon({
+className: '',
+html: <div class="custom-marker" style="width:24px;height:24px;"&gt;&lt;/div>,
+iconSize: [24, 24],
+iconAnchor: [12, 24],
+});
+
+const marker = L.marker([loc.lat, loc.lng], { icon })
+.addTo(map)
+.on('click', () => showMapPanel(loc));
+
+L.tooltip({ permanent: true, direction: 'top', className: '', offset: [0, -28] })
+.setContent(<span style="font-size:11px;font-weight:600;color:#1A365D;background:#F7F3ED;padding:2px 6px;border-radius:4px;border:1px solid #CBD5E0;"&gt;${loc.icon} ${loc.title}&lt;/span>)
+.setLatLng([loc.lat, loc.lng])
+.addTo(map);
+
+markers[loc.id] = marker;
+});
+
+if (navigator.geolocation) {
+navigator.geolocation.watchPosition(pos => {
+const { latitude: lat, longitude: lng } = pos.coords;
+userLatLng = { lat, lng };
+
+if (!map._userMarker) {
+const userIcon = L.divIcon({
+className: '',
+html: <div class="user-marker" style="width:18px;height:18px;"&gt;&lt;/div>,
+iconSize: [18, 18],
+iconAnchor: [9, 9],
+});
+map._userMarker = L.marker([lat, lng], { icon: userIcon }).addTo(map);
+L.tooltip({ permanent: false, direction: 'top', offset: [0, -12] })
+.setContent('<span style="font-size:11px;font-weight:600;color:#1A365D;">📍 You</span>')
+.setLatLng([lat, lng])
+.addTo(map);
+} else {
+map._userMarker.setLatLng([lat, lng]);
+}
+}, null, { enableHighAccuracy: true });
+}
+
+map.on('click', () => {
+document.getElementById('mapPanel').classList.remove('visible');
+});
+}
+
+let panelLocationId = null;
+
+function showMapPanel(loc) {
+panelLocationId = loc.id;
+document.getElementById('panelName').textContent = ${loc.icon} ${loc.title};
+const dist = distanceTo(loc);
+document.getElementById('panelDist').textContent = dist ? formatDist(dist) : loc.subtitle;
+document.getElementById('mapPanel').classList.add('visible');
+}
+
+function openCurrentLocation() {
+if (panelLocationId) openLocation(panelLocationId);
+}
+
+// ── LOCATION DETAIL ────────────────────────────────────────────────
+function openLocation(id) {
+currentLocationId = id;
+const loc = locations[id];
+const dist = distanceTo(loc);
+
+const detailEl = document.getElementById('detailView');
+
+let wordsHTML = '';
+loc.text.forEach(word => {
+if (word.en === 'break') {
+wordsHTML += <div class="word-break"&gt;&lt;/div>;
+return;
+}
+const tr = word[currentLang] || '';
+const tr2 = currentLang === 'ru' ? (word.kz || '') : (word.ru || '');
+const lang2label = currentLang === 'ru' ? 'kz' : 'ru';
+
+// Speak button inside tooltip: speaks EN word, then translation
+const speakEN = onclick="event.stopPropagation();speak('${word.en.replace(/'/g,"\'")}','en')"; const speakTr = tr ?onclick="event.stopPropagation();speak('${tr.replace(/'/g,"\\'")}','${currentLang}')": ''; const speakTr2 = tr2 ?onclick="event.stopPropagation();speak('${tr2.replace(/'/g,"\\'")}','${lang2label}')"` : '';
+
+wordsHTML += &lt;div class="word-chip" onclick="this.classList.toggle('active')"&gt; &lt;span class="word-en"&gt;${word.en}
+latex
+{ttsSupported ? `<button class="word-speak-btn" title="Pronounce" 
+
+{speakEN}>🔊</button>: ''} &lt;/span&gt; &lt;div class="word-tooltip"&gt; &lt;div class="tr"&gt; ${currentLang.toUpperCase()}: ${tr} ${ttsSupported && tr ? <button class="tooltip-speak-btn"${speakTr}>🔊</button>: ''} &lt;/div&gt; ${tr2 ? <div class="tr2"&gt;${lang2label.toUpperCase()}:  {ttsSupported ? <button class="tooltip-speak-btn" ${speakTr2}>🔊</button>: ''} &lt;/div> : ''}
+</div>
+</div>`;
+});
+
+// Sentence read-aloud bar
+const ttsBar = ttsSupported ? &lt;div class="tts-bar"&gt; &lt;span class="tts-label"&gt;Listen to sentence:&lt;/span&gt; &lt;div class="tts-btns"&gt; &lt;button class="tts-btn" onclick="speakSentence('en')"&gt;🇬🇧 EN&lt;/button&gt; &lt;button class="tts-btn" onclick="speakSentence('${currentLang}')">${currentLang === 'ru' ? '🇷🇺 RU' : '🇰🇿 KZ'}&lt;/button&gt; &lt;button class="tts-btn tts-stop" onclick="synth.cancel()"&gt;⏹️&lt;/button&gt; &lt;/div&gt; &lt;/div> : '';
+
+detailEl.innerHTML = &lt;div class="hero-wrapper"&gt; &lt;img class="hero-img" src="${loc.image}" alt=" {loc.icon}</div>
+<div class="hero-overlay">
+<button class="back-btn" onclick="synth.cancel();showView(window._prevView || 'map')">← Back</button>
+<div class="hero-title"> {loc.subtitle}</div>
+latex
+{dist ? `<div class="distance-badge"&gt;📍 
+
+{formatDist(dist)}</div>: ''} &lt;/div&gt; &lt;/div&gt; &lt;div class="lang-toggle"&gt; &lt;button class="lang-btn ${currentLang==='ru'?'active':''}" onclick="setLang('ru')">🇷🇺 Русский</button>
+<button class="lang-btn ${currentLang==='kz'?'active':''}" onclick="setLang('kz')"&gt;🇰🇿 Қазақша&lt;/button&gt; &lt;/div&gt; ${ttsBar}
+<div class="vocab-section">
+<div class="vocab-grid" id="vocabGrid">${wordsHTML}&lt;/div&gt; &lt;/div&gt;;
+
+showView('detail');
+}
+
+function setLang(lang) {
+currentLang = lang;
+synth.cancel();
+openLocation(currentLocationId);
+}
+
+// ── LIST ──────────────────────────────────────────────────────────
+function renderList() {
+const container = document.getElementById('locationCards');
+container.innerHTML = Object.values(locations).map(loc => {
+const dist = distanceTo(loc);
+return &lt;div class="loc-card" onclick="window._prevView='list'; openLocation('${loc.id}')">
+<div class="loc-thumb">
+<img src="${loc.image}" alt="${loc.title}" onerror="this.parentElement.innerHTML='<span class=loc-thumb-fallback>${loc.icon}&lt;/span&gt;'"&gt; &lt;/div&gt; &lt;div class="card-content"&gt; &lt;div class="loc-title"&gt;${loc.title}</div>
+<div class="loc-sub">${loc.subtitle}&lt;/div&gt; ${dist ? <div class="loc-dist-pill"&gt;📍${formatDist(dist)}</div>: ''} &lt;/div&gt; &lt;div class="card-arrow"&gt;→&lt;/div&gt; &lt;/div>;
+}).join('');
+}
+
+// ── BOOT ──────────────────────────────────────────────────────────
+showView('map');
+</script>
+</body>
+</html>
